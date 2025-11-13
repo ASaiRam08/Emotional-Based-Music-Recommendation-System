@@ -1,0 +1,72 @@
+CREATE OR REPLACE FUNCTION get_recommendations(p_user INT, p_mood_name TEXT DEFAULT NULL, p_limit INT DEFAULT 10)
+RETURNS TABLE (
+    song_id INT,
+    title TEXT,
+    artist_name TEXT,
+    match_score NUMERIC,
+    reason TEXT
+) LANGUAGE plpgsql AS $$
+DECLARE
+    v_mood_id INT;
+    v_recent_features RECORD;
+BEGIN
+    -- determine target mood id
+    IF p_mood_name IS NULL THEN
+        SELECT ue.mood_id INTO v_mood_id
+        FROM user_emotions ue
+        WHERE ue.user_id = p_user
+        ORDER BY ue.recorded_at DESC
+        LIMIT 1;
+    ELSE
+        SELECT mood_id INTO v_mood_id FROM moods WHERE name = p_mood_name;
+    END IF;
+
+    -- compute user's recent avg features (last 20 listens)
+    SELECT AVG(sf.tempo) AS tempo, AVG(sf.energy) AS energy, AVG(sf.valence) AS valence,
+           AVG(sf.danceability) AS danceability, AVG(sf.acousticness) AS acousticness
+    INTO v_recent_features
+    FROM listening_history lh
+    JOIN song_features sf ON sf.song_id = lh.song_id
+    WHERE lh.user_id = p_user
+    ORDER BY lh.listened_at DESC
+    LIMIT 100; -- aggregate over recent 100 listens (AVG works even without LIMIT in PG, but we keep)
+    -- If no history, v_recent_features will be NULL
+
+    RETURN QUERY
+    WITH recent AS (
+        SELECT song_id FROM listening_history
+        WHERE user_id = p_user
+        AND listened_at >= now() - INTERVAL '30 days'
+    ), candidates AS (
+        SELECT s.song_id, s.title, a.name AS artist_name, sf.tempo, sf.energy, sf.valence, sf.danceability, sf.acousticness,
+               pc.plays,
+               (CASE WHEN sm.mood_id = v_mood_id THEN 1 ELSE 0 END) AS mood_match
+        FROM songs s
+        JOIN song_features sf ON sf.song_id = s.song_id
+        LEFT JOIN artists a ON a.artist_id = s.artist_id
+        LEFT JOIN play_counts pc ON pc.song_id = s.song_id
+        LEFT JOIN song_moods sm ON sm.song_id = s.song_id
+        WHERE s.song_id NOT IN (SELECT song_id FROM recent)
+    ), scored AS (
+        SELECT c.*, 
+          -- content similarity distance (if user has history), else use 0 (neutral)
+          CASE WHEN v_recent_features IS NULL THEN 0
+               ELSE (
+                 POWER((c.tempo - COALESCE(v_recent_features.tempo, c.tempo))/NULLIF(GREATEST(c.tempo,COALESCE(v_recent_features.tempo, c.tempo)),0),2)
+                 + POWER((c.energy - COALESCE(v_recent_features.energy, c.energy)),2)
+                 + POWER((c.valence - COALESCE(v_recent_features.valence, c.valence)),2)
+                 + POWER((c.danceability - COALESCE(v_recent_features.danceability, c.danceability)),2)
+                 + POWER((c.acousticness - COALESCE(v_recent_features.acousticness, c.acousticness)),2)
+               ) END AS content_distance
+        FROM candidates c
+    )
+    SELECT song_id, title, artist_name,
+        -- composite score: prioritize mood match (higher) and lower content_distance and higher popularity
+        -- normalized scoring: mood_match * 2 - (content_distance) + log(plays+1)*0.5
+        (COALESCE(mood_match,0) * 2.0 - COALESCE(content_distance,0) + COALESCE(ln(plays+1),0) * 0.5) AS match_score,
+        (CASE WHEN mood_match=1 THEN 'mood_match' ELSE 'similar_content' END) AS reason
+    FROM scored
+    ORDER BY match_score DESC NULLS LAST
+    LIMIT p_limit;
+END;
+$$;
