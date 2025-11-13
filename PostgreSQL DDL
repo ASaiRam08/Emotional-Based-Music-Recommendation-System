@@ -1,0 +1,106 @@
+-- 1. Core tables
+CREATE TABLE users (
+    user_id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE artists (
+    artist_id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+CREATE TABLE albums (
+    album_id SERIAL PRIMARY KEY,
+    artist_id INT REFERENCES artists(artist_id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    release_date DATE
+);
+
+CREATE TABLE genres (
+    genre_id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE moods (
+    mood_id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL  -- e.g., 'happy','sad','calm','angry','romantic','energetic'
+);
+
+CREATE TABLE songs (
+    song_id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist_id INT REFERENCES artists(artist_id),
+    album_id INT REFERENCES albums(album_id),
+    duration_seconds INT,
+    release_date DATE,
+    popularity BIGINT DEFAULT 0,   -- aggregated play count
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- song <> genre (many-to-many)
+CREATE TABLE song_genres (
+    song_id INT REFERENCES songs(song_id) ON DELETE CASCADE,
+    genre_id INT REFERENCES genres(genre_id) ON DELETE CASCADE,
+    PRIMARY KEY (song_id, genre_id)
+);
+
+-- song <> mood (many-to-many)
+CREATE TABLE song_moods (
+    song_id INT REFERENCES songs(song_id) ON DELETE CASCADE,
+    mood_id INT REFERENCES moods(mood_id) ON DELETE CASCADE,
+    PRIMARY KEY (song_id, mood_id)
+);
+
+-- acoustic / audio features (content attributes for similarity)
+CREATE TABLE song_features (
+    song_id INT PRIMARY KEY REFERENCES songs(song_id) ON DELETE CASCADE,
+    tempo NUMERIC,     -- BPM
+    energy NUMERIC,    -- 0..1
+    valence NUMERIC,   -- 0..1 (negative->positive)
+    danceability NUMERIC, -- 0..1
+    acousticness NUMERIC, -- 0..1
+    instrumentalness NUMERIC, -- 0..1
+    loudness NUMERIC   -- in dB (negative)
+);
+
+-- listening history
+CREATE TABLE listening_history (
+    listen_id BIGSERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(user_id) ON DELETE CASCADE,
+    song_id INT REFERENCES songs(song_id) ON DELETE CASCADE,
+    listened_at TIMESTAMPTZ DEFAULT now(),
+    reported_mood_id INT REFERENCES moods(mood_id),  -- mood at time of listening (optional)
+    device TEXT
+);
+
+-- explicit user emotion table (most recent emotion per user or logged time-series)
+CREATE TABLE user_emotions (
+    user_emotion_id BIGSERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(user_id) ON DELETE CASCADE,
+    mood_id INT REFERENCES moods(mood_id),
+    confidence NUMERIC DEFAULT 1.0,  -- if inferred
+    recorded_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- play counts log (incremental)
+CREATE TABLE play_counts (
+    song_id INT PRIMARY KEY REFERENCES songs(song_id) ON DELETE CASCADE,
+    plays BIGINT NOT NULL DEFAULT 0,
+    last_played TIMESTAMPTZ
+);
+
+-- optional: table to store recommended results (cache)
+CREATE TABLE recommendations_cache (
+    user_id INT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    recommended_at TIMESTAMPTZ,
+    payload JSONB  -- cached array of recommended songs
+);
+
+-- Indexes for fast lookups
+CREATE INDEX idx_listen_user_time ON listening_history(user_id, listened_at DESC);
+CREATE INDEX idx_listen_song_time ON listening_history(song_id, listened_at DESC);
+CREATE INDEX idx_songs_popularity ON songs(popularity DESC);
+CREATE INDEX idx_song_moods_mood ON song_moods(mood_id);
+CREATE INDEX idx_user_emotions_user_time ON user_emotions(user_id, recorded_at DESC);
