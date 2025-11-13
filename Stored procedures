@@ -1,0 +1,16 @@
+CREATE OR REPLACE FUNCTION record_listen(p_user INT, p_song INT, p_mood INT DEFAULT NULL, p_device TEXT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO listening_history(user_id, song_id, reported_mood_id, device)
+    VALUES (p_user, p_song, p_mood, p_device);
+
+    -- update play_counts table
+    INSERT INTO play_counts(song_id, plays, last_played)
+    VALUES (p_song, 1, now())
+    ON CONFLICT (song_id) DO UPDATE
+      SET plays = play_counts.plays + 1, last_played = now();
+
+    -- update songs.popularity (aggregate, simple increment)
+    UPDATE songs SET popularity = popularity + 1 WHERE song_id = p_song;
+END;
+$$;
